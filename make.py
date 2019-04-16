@@ -89,7 +89,9 @@ def main():
         print("ZIP file creation failed.")
         return 3
     # Create a commit and tag it.
-    repo.index.add(BUILD_FILES, write=True)
+    # TODO: repo.index.add seems to mess up line endings
+    # repo.index.add(BUILD_FILES, write=True)
+    subprocess.run(("git", "add") + BUILD_FILES)
     repo.index.commit(
         "Built version {}.{}.{}.{}".format(
             MAJOR,
