@@ -98,8 +98,6 @@ class MouseStatus:
         self.buttons = MouseButtons()
         self.keyboard_keys.clear()
 
-_joysticks = []
-_joystick_statuses = []
 _JOYSTICK_BUTTON_TO_KEYBOARD = {
     1:  KeyPress((), ("up",)),
     2:  KeyPress((), ("down",)),
@@ -118,8 +116,6 @@ def axis_to_scroll_speed(axis_value):
     return (axis_value * MOUSE_SCROLL_SPEED) ** 3
 def init_joystick(joystick):
     status = MouseStatus()
-    _joysticks.append(joystick)
-    _joystick_statuses.append(status)
     @joystick.event
     def on_button(button, pressed):
         pressed = bool(pressed)
@@ -165,20 +161,22 @@ def init_joystick(joystick):
             right_trigger_last = right_trigger_new
         else:
             print("Unsupported axis", axis, value)
+    return status
 def init():
     pyautogui.PAUSE = 0.0
     pyautogui.FAILSAFE = False
-    for joystick in xinput.XInputJoystick.enumerate_devices():
-        init_joystick(joystick)
-def loop():
+    joysticks = xinput.XInputJoystick.enumerate_devices()
+    joystick_statuses = [init_joystick(joystick) for joystick in joysticks]
+    return joysticks, joystick_statuses
+def loop(joysticks, joystick_statuses):
     while True:
-        for status in _joystick_statuses:
+        for status in joystick_statuses:
             status.loop_iter()
         # Dispatch all events.
-        for joystick in _joysticks:
+        for joystick in joysticks:
             joystick.dispatch_events()
         # Mix all controllers together.
-        combined = MouseStatus.combine(_joystick_statuses)
+        combined = MouseStatus.combine(joystick_statuses)
         # Do the mouse movement.
         pyautogui.move(*attr.astuple(combined.position_speed))
         # Do the mouse scrolling.
@@ -219,10 +217,10 @@ def main():
             version.REVISION
         )
     )
-    init()
-    print("Found {} controller(s)".format(len(_joysticks)))
+    joysticks, joystick_statuses = init()
+    print("Found {} controller(s)".format(len(joysticks)))
     print(HELP)
-    loop()
+    loop(joysticks, joystick_statuses)
 
 if __name__ == "__main__":
     main()
