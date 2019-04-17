@@ -8,17 +8,19 @@ MOUSE_POSITION_SPEED = 8.0
 MOUSE_SCROLL_SPEED = 8.0
 HELP = '''
 Controls:
-    Left joystick:     move cursor
-    Right joystick:    scroll (vertical only on Windows)
-    A or left bumper:  left click
-    Y or right bumper: right click
-    X:                 middle click
-    B:                 back button
-    Menu:              Windows key
-    View:              Windows+Tab
-    D-pad:             arrow keys
-    Left trigger:      Home
-    Right trigger:     End
+    Left joystick:        move cursor
+    Right joystick:       scroll (vertical only on Windows)
+    Left joystick click:  Ctrl
+    Right joystick click: Shift
+    A or left bumper:     left click
+    Y or right bumper:    right click
+    X:                    middle click
+    B:                    back button
+    Menu:                 Windows key
+    View:                 Windows+Tab
+    D-pad:                arrow keys
+    Left trigger:         Home
+    Right trigger:        End
 '''
 
 @attr.s(auto_attribs=True)
@@ -122,6 +124,8 @@ _JOYSTICK_BUTTON_TO_KEYBOARD_KEYS: typing.Dict[int, Presses.Sequence] = {
     4:  ("right",),       # D-pad right
     5:  ("win",),         # menu
     6:  ("win", "tab"),   # view
+    7:  ("ctrl",),        # left joystick click
+    8:  ("shift",),       # right joystick click
     14: ("browserback",), # B
 }
 _LEFT_TRIGGER_KEYS: Presses.Sequence = ("home",)
