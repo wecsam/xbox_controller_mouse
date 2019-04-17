@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import common, config, version_update
-import attr, pyautogui, sys, time, typing
+import attr, collections, pyautogui, sys, time, typing
 sys.path.insert(1, config.XINPUT_DIR)
 import xinput
 
@@ -39,164 +39,220 @@ class Vector:
             )
         raise TypeError("other must be a Vector")
 @attr.s(auto_attribs=True)
-class MouseButtons:
-    '''
-    Each property is True if the button should be pressed, False if the button
-    should be released, or None if the button doesn't need to be pressed or
-    released.
-    '''
-    left: typing.Optional[bool] = None
-    middle: typing.Optional[bool] = None
-    right: typing.Optional[bool] = None
-    def __or__(self, other):
-        cls = type(self)
-        if isinstance(other, cls):
-            # In the result, a button is pressed if it was pressed in either
-            # MouseButtons object.
-            return cls(
-                *[
-                    (
-                        any(pressed)
-                        if any(button is not None for button in pressed)
-                        else None
-                    )
-                    for pressed in zip(
-                        attr.astuple(self),
-                        attr.astuple(other)
-                    )
-                ]
-            )
-        raise TypeError("other must be a MouseButtons")
-@attr.s(auto_attribs=True, frozen=True)
-class KeyPress:
-    hold_down: typing.Iterable[str] = attr.Factory(list)
-    press_and_release: typing.Iterable[str] = attr.Factory(list)
-@attr.s(auto_attribs=True)
-class MouseStatus:
+class MouseMovement:
     position_speed: Vector = attr.Factory(Vector)
     scroll_speed: Vector = attr.Factory(Vector)
-    buttons: MouseButtons = attr.Factory(MouseButtons)
-    keyboard_keys: typing.Iterable[KeyPress] = attr.Factory(list)
     @classmethod
     def combine(cls, statuses):
         '''
-        Combines multiple joystick statuses together into one. Axes positions
-        are summed. Buttons are logically disjuncted.
+        Combines multiple mouse movements together into one. Vectors are
+        summed.
         '''
         result = cls()
         for status in statuses:
             result.position_speed += status.position_speed
             result.scroll_speed += status.scroll_speed
-            result.buttons |= status.buttons
-            result.keyboard_keys.extend(status.keyboard_keys)
         return result
-    def loop_iter(self):
+class Presses:
+    '''
+    Keeps track of which buttons or keys should be held down. If a button or
+    key is queued to be pressed down multiple times, it must be queued to be
+    released the same number of times for this class to consider it released.
+    '''
+    KeyOrButtonId: typing.ClassVar[type] = str
+    Sequence: typing.ClassVar[type] = typing.Sequence[KeyOrButtonId]
+    def __init__(self):
+        self._queue_down = collections.deque()
+        self._queue_up = collections.deque()
+        self._num_presses = collections.defaultdict(lambda: 0)
+    def queue_press_down(self, ids: Sequence) -> None:
         '''
-        Call this function at the beginning of each iteration of the main loop,
-        before any events are dispatched.
+        Queues a sequence of buttons or keys to be pressed down.
         '''
-        self.buttons = MouseButtons()
-        self.keyboard_keys.clear()
+        self._queue_down.extend(ids)
+    def queue_release(self, ids: Sequence) -> None:
+        '''
+        Queues a sequence of buttons or keys to be released in reverse order.
+        '''
+        self._queue_up.extend(reversed(ids))
+    def process_queue(self) -> typing.Tuple[
+            typing.Sequence[KeyOrButtonId],
+            typing.Sequence[KeyOrButtonId]
+        ]:
+        '''
+        Processes and clears the internal queues. Returns which buttons or keys
+        should have been pressed or released since the last call.
+        '''
+        press_down_now: typing.Sequence[KeyOrButtonId] = []
+        release_now: typing.Sequence[KeyOrButtonId] = []
+        while self._queue_down:
+            id: KeyOrButtonId = self._queue_down.popleft()
+            if self._num_presses[id] <= 0:
+                # The button or key is not pressed.
+                self._num_presses[id] = 1
+                # It should be pressed now.
+                press_down_now.append(id)
+            else:
+                # The button or key is already pressed.
+                self._num_presses[id] += 1
+        while self._queue_up:
+            id: KeyOrButtonId = self._queue_up.popleft()
+            if self._num_presses[id] <= 1:
+                # The button or key is pressed only once.
+                self._num_presses[id] = 0
+                # It should be released now.
+                release_now.append(id)
+            else:
+                # The button or key is pressed more than once.
+                # Don't release it right now.
+                self._num_presses[id] -= 1
+        return press_down_now, release_now
 
-_JOYSTICK_BUTTON_TO_KEYBOARD = {
-    1:  KeyPress((), ("up",)),
-    2:  KeyPress((), ("down",)),
-    3:  KeyPress((), ("left",)),
-    4:  KeyPress((), ("right",)),
-    5:  KeyPress((), ("win",)), # menu
-    6:  KeyPress(("win",), ("tab",)), # view
-    14: KeyPress((), ("browserback",)) # B
+_JOYSTICK_BUTTON_TO_MOUSE_BUTTONS: typing.Dict[int, Presses.Sequence] = {
+    9:  ("left",),        # left bumper
+    13: ("left",),        # A
+    10: ("right",),       # right bumper
+    16: ("right",),       # Y
+    15: ("middle",),      # X
 }
-_KEYPRESS_HOME = KeyPress((), ("home",))
-_KEYPRESS_END = KeyPress((), ("end",))
+_JOYSTICK_BUTTON_TO_KEYBOARD_KEYS: typing.Dict[int, Presses.Sequence] = {
+    1:  ("up",),          # D-pad up
+    2:  ("down",),        # D-pad down
+    3:  ("left",),        # D-pad left
+    4:  ("right",),       # D-pad right
+    5:  ("win",),         # menu
+    6:  ("win", "tab"),   # view
+    14: ("browserback",), # B
+}
+_LEFT_TRIGGER_KEYS: Presses.Sequence = ("home",)
+_RIGHT_TRIGGER_KEYS: Presses.Sequence = ("end",)
 
 def axis_to_position_speed(axis_value):
     return (axis_value * MOUSE_POSITION_SPEED) ** 3
 def axis_to_scroll_speed(axis_value):
     return (axis_value * MOUSE_SCROLL_SPEED) ** 3
-def init_joystick(joystick):
-    status = MouseStatus()
+def init_trigger(
+    presses: Presses,
+    keys: Presses.Sequence
+) -> typing.Callable[[float], None]:
+    '''
+    Returns a callback function that presses or releases the given key sequence
+    based on the trigger input. When the trigger is pulled, the keys are queued
+    to be pressed down. When the trigger is released, the keys are queued to be
+    released.
+    '''
+    was_pulled = False
+    def handler(current_deflection: float) -> None:
+        nonlocal was_pulled
+        is_pulled = current_deflection > 0.5
+        if was_pulled:
+            if not is_pulled:
+                # The trigger was released.
+                # Release the keyboard keys in reverse order.
+                presses.queue_release(keys)
+        else:
+            if is_pulled:
+                # The trigger was pulled.
+                # Press the keyboard keys.
+                presses.queue_press_down(keys)
+        was_pulled = is_pulled
+    return handler
+def init_joystick(
+    joystick: xinput.XInputJoystick,
+    mouse_presses: Presses,
+    keyboard_presses: Presses
+) -> MouseMovement:
+    mouse_movement = MouseMovement()
     @joystick.event
     def on_button(button, pressed):
-        pressed = bool(pressed)
-        if button in (9, 13): # left bumper or A
-            status.buttons.left = pressed
-        elif button in (10, 16): # right bumper or Y
-            status.buttons.right = pressed
-        elif button == 15: # X
-            status.buttons.middle = pressed
-        else:
-            press = _JOYSTICK_BUTTON_TO_KEYBOARD.get(button)
-            if press:
-                if not pressed: # trigger on release
-                    status.keyboard_keys.append(press)
+        # Check for a mapping from the joystick button to a mouse button or
+        # to a sequence of multiple mouse buttons.
+        mouse_buttons = _JOYSTICK_BUTTON_TO_MOUSE_BUTTONS.get(button)
+        if mouse_buttons is not None:
+            if pressed:
+                # Push the buttons down.
+                mouse_presses.queue_press_down(mouse_buttons)
             else:
-                print(
-                    "Unsupported button",
-                    button,
-                    "down" if pressed else "up"
-                )
-    left_trigger_last = False
-    right_trigger_last = False
+                # Release the buttons in reverse order.
+                mouse_presses.queue_release(mouse_buttons)
+            return
+        # Check for a mapping from the joystick button to a sequence of
+        # keyboard keys.
+        keys = _JOYSTICK_BUTTON_TO_KEYBOARD_KEYS.get(button)
+        if keys is not None:
+            if pressed:
+                # Push the keys down.
+                keyboard_presses.queue_press_down(keys)
+            else:
+                # Release the keys in reverse order.
+                keyboard_presses.queue_release(keys)
+            return
+        # This button is not mapped to anything.
+        print("Unmapped button", button, "down" if pressed else "up")
+    left_trigger_handler = init_trigger(keyboard_presses, _LEFT_TRIGGER_KEYS)
+    right_trigger_handler = init_trigger(keyboard_presses, _RIGHT_TRIGGER_KEYS)
     @joystick.event
     def on_axis(axis, value):
-        nonlocal left_trigger_last, right_trigger_last
         if axis == "l_thumb_x":
-            status.position_speed.x = axis_to_position_speed(value)
+            mouse_movement.position_speed.x = axis_to_position_speed(value)
         elif axis == "l_thumb_y":
-            status.position_speed.y = -axis_to_position_speed(value)
+            mouse_movement.position_speed.y = -axis_to_position_speed(value)
         elif axis == "r_thumb_x":
-            status.scroll_speed.x = -axis_to_scroll_speed(value)
+            mouse_movement.scroll_speed.x = -axis_to_scroll_speed(value)
         elif axis == "r_thumb_y":
-            status.scroll_speed.y = axis_to_scroll_speed(value)
+            mouse_movement.scroll_speed.y = axis_to_scroll_speed(value)
         elif axis == "left_trigger":
-            left_trigger_new = value > 0.5
-            if left_trigger_last and not left_trigger_new: # trigger released
-                status.keyboard_keys.append(_KEYPRESS_HOME)
-            left_trigger_last = left_trigger_new
+            left_trigger_handler(value)
         elif axis == "right_trigger":
-            right_trigger_new = value > 0.5
-            if right_trigger_last and not right_trigger_new: # trigger released
-                status.keyboard_keys.append(_KEYPRESS_END)
-            right_trigger_last = right_trigger_new
+            right_trigger_handler(value)
         else:
-            print("Unsupported axis", axis, value)
-    return status
-def init():
+            print("Unmapped axis", axis, value)
+    return mouse_movement
+def init() -> typing.Tuple[
+    typing.Iterable[xinput.XInputJoystick],
+    typing.Iterable[MouseMovement],
+    Presses,
+    Presses
+]:
     pyautogui.PAUSE = 0.0
     pyautogui.FAILSAFE = False
+    mouse_presses = Presses()
+    keyboard_presses = Presses()
     joysticks = xinput.XInputJoystick.enumerate_devices()
-    joystick_statuses = [init_joystick(joystick) for joystick in joysticks]
-    return joysticks, joystick_statuses
-def loop(joysticks, joystick_statuses):
+    mouse_movements = [
+        init_joystick(joystick, mouse_presses, keyboard_presses)
+        for joystick in joysticks
+    ]
+    return joysticks, mouse_movements, mouse_presses, keyboard_presses
+def loop(
+    joysticks: typing.Iterable[xinput.XInputJoystick],
+    mouse_movements: typing.Iterable[MouseMovement],
+    mouse_presses: Presses,
+    keyboard_presses: Presses
+) -> None:
     while True:
-        for status in joystick_statuses:
-            status.loop_iter()
         # Dispatch all events.
         for joystick in joysticks:
             joystick.dispatch_events()
         # Mix all controllers together.
-        combined = MouseStatus.combine(joystick_statuses)
+        combined = MouseMovement.combine(mouse_movements)
         # Do the mouse movement.
         pyautogui.move(*attr.astuple(combined.position_speed))
         # Do the mouse scrolling.
         pyautogui.hscroll(int(combined.scroll_speed.x))
         pyautogui.vscroll(int(combined.scroll_speed.y))
         # Do the mouse button presses.
-        for button, press_down in attr.asdict(combined.buttons).items():
-            if press_down is not None:
-                if press_down:
-                    pyautogui.mouseDown(button=button)
-                else:
-                    pyautogui.mouseUp(button=button)
+        down, up = mouse_presses.process_queue()
+        for button in down:
+            pyautogui.mouseDown(button=button)
+        for button in up:
+            pyautogui.mouseUp(button=button)
         # Do the keyboard key presses.
-        for press in combined.keyboard_keys:
-            for key in press.hold_down:
-                pyautogui.keyDown(key)
-            for key in press.press_and_release:
-                pyautogui.press(key)
-            for key in press.hold_down:
-                pyautogui.keyUp(key)
+        down, up = keyboard_presses.process_queue()
+        for key in down:
+            pyautogui.keyDown(key)
+        for key in up:
+            pyautogui.keyUp(key)
         # Sleep.
         try:
             time.sleep(0.017)
@@ -217,10 +273,10 @@ def main():
             version.REVISION
         )
     )
-    joysticks, joystick_statuses = init()
+    joysticks, *loop_args = init()
     print("Found {} controller(s)".format(len(joysticks)))
     print(HELP)
-    loop(joysticks, joystick_statuses)
+    loop(joysticks, *loop_args)
 
 if __name__ == "__main__":
     main()
