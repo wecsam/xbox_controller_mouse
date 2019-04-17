@@ -2,7 +2,7 @@
 import common, config, version_update
 import git, itertools, os, shutil, subprocess, sys
 MAJOR = 0
-MINOR = 1
+MINOR = 2
 MAIN_FILENAME = "xbox_controller_mouse.py"
 BUILD_FILES = ("make.py", "version.py")
 

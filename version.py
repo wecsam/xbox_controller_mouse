@@ -4,6 +4,6 @@
 # MAJOR and MINOR should be updated in make.py.
 # BUILD and REVISION are incremented automatically.
 MAJOR = 0
-MINOR = 1
+MINOR = 2
 BUILD = 0
-REVISION = 7
+REVISION = 0
